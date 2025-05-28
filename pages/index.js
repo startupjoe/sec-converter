@@ -2,7 +2,8 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Download, AlertCircle, CheckCircle, Loader, Search, 
   FileSpreadsheet, Building2, TrendingUp,
-  Database, Zap, Shield, Activity, Target, BarChart
+  Database, Zap, Shield, Activity, Target, BarChart,
+  AlertTriangle
 } from 'lucide-react';
 
 const SECConverter = () => {
@@ -16,6 +17,7 @@ const SECConverter = () => {
   const [analysisProgress, setAnalysisProgress] = useState(0);
   const [currentStep, setCurrentStep] = useState('');
   const [recentDownloads, setRecentDownloads] = useState([]);
+  const [dataQuality, setDataQuality] = useState(null);
 
   // Debounced search function
   const searchCompanies = useCallback(async (query) => {
@@ -56,6 +58,7 @@ const SECConverter = () => {
     setSelectedCompany(company);
     setSearchQuery(company.ticker);
     setSearchResults([]);
+    setDataQuality(null);
 
     // Get additional company info
     try {
@@ -66,6 +69,24 @@ const SECConverter = () => {
       }
     } catch (error) {
       console.error('Failed to fetch company details:', error);
+    }
+  };
+
+  // Format large numbers
+  const formatNumber = (num) => {
+    if (num === null || num === undefined || isNaN(num)) return 'N/A';
+    
+    const absNum = Math.abs(num);
+    const sign = num < 0 ? '-' : '';
+    
+    if (absNum >= 1e9) {
+      return `${sign}$${(absNum / 1e9).toFixed(2)}B`;
+    } else if (absNum >= 1e6) {
+      return `${sign}$${(absNum / 1e6).toFixed(2)}M`;
+    } else if (absNum >= 1e3) {
+      return `${sign}$${(absNum / 1e3).toFixed(2)}K`;
+    } else {
+      return `${sign}$${absNum.toFixed(2)}`;
     }
   };
 
@@ -80,6 +101,7 @@ const SECConverter = () => {
     setError('');
     setSuccess('');
     setAnalysisProgress(0);
+    setDataQuality(null);
 
     const steps = [
       'Validating company information...',
@@ -90,8 +112,8 @@ const SECConverter = () => {
       'Processing balance sheet...',
       'Processing cash flow statement...',
       'Calculating financial ratios...',
-      'Generating Excel workbook...',
-      'Finalizing download...'
+      'Validating data accuracy...',
+      'Generating Excel workbook...'
     ];
 
     try {
@@ -108,6 +130,15 @@ const SECConverter = () => {
           }
 
           const secData = await response.json();
+          
+          // Check data quality
+          if (secData.dataQuality) {
+            setDataQuality(secData.dataQuality);
+            
+            if (secData.dataQuality.score < 50) {
+              throw new Error('Data quality too low. Please try another company or report this issue.');
+            }
+          }
 
           // Generate Excel content
           const excelContent = generateEnhancedExcel(selectedCompany, secData);
@@ -130,7 +161,8 @@ const SECConverter = () => {
             company: selectedCompany.name,
             date: new Date().toLocaleDateString(),
             time: new Date().toLocaleTimeString(),
-            fileSize: Math.round(excelContent.length / 1024) + ' KB'
+            dataYear: secData.metadata?.dataYear || 'N/A',
+            dataQuality: secData.dataQuality?.score || 0
           };
 
           setRecentDownloads(prev => [newDownload, ...prev.slice(0, 9)]);
@@ -150,13 +182,13 @@ const SECConverter = () => {
     }
   };
 
-  // Enhanced Excel generation with more data
+  // Enhanced Excel generation with validated data
   const generateEnhancedExcel = (company, secData) => {
-    const { incomeStatement, balanceSheet, cashFlowStatement, keyMetrics } = secData;
+    const { metadata, incomeStatement, balanceSheet, cashFlowStatement, keyMetrics } = secData;
     
     let content = '';
 
-    // Company Header
+    // Header with metadata
     content += `SEC 10-K FINANCIAL DATA EXTRACT\n`;
     content += `Company: ${company.name}\n`;
     content += `Ticker: ${company.ticker}\n`;
@@ -164,48 +196,105 @@ const SECConverter = () => {
     content += `Industry: ${company.sicDescription || 'N/A'}\n`;
     content += `State of Incorporation: ${company.stateOfIncorporation || 'N/A'}\n`;
     content += `Fiscal Year End: ${company.fiscalYearEnd || 'N/A'}\n`;
-    content += `Generated: ${new Date().toLocaleString()}\n\n`;
+    content += `Data Year: ${metadata?.dataYear || 'N/A'}\n`;
+    content += `Filing Date: ${metadata?.filingDate || 'N/A'}\n`;
+    content += `Generated: ${new Date().toLocaleString()}\n`;
+    content += `Data Quality Score: ${secData.dataQuality?.score || 'N/A'}/110\n\n`;
 
     // Income Statement
     content += `INCOME STATEMENT (in USD)\n`;
     content += `Revenue,${incomeStatement?.revenues?.toLocaleString() || 'N/A'}\n`;
     content += `Cost of Revenue,${incomeStatement?.costOfRevenues?.toLocaleString() || 'N/A'}\n`;
     content += `Gross Profit,${incomeStatement?.grossProfit?.toLocaleString() || 'N/A'}\n`;
+    
+    if (incomeStatement?.operatingExpenses) {
+      content += `Selling General & Admin,${incomeStatement.operatingExpenses.sga?.toLocaleString() || 'N/A'}\n`;
+      content += `Research & Development,${incomeStatement.operatingExpenses.rd?.toLocaleString() || 'N/A'}\n`;
+      content += `Total Operating Expenses,${incomeStatement.operatingExpenses.total?.toLocaleString() || 'N/A'}\n`;
+    }
+    
     content += `Operating Income,${incomeStatement?.operatingIncome?.toLocaleString() || 'N/A'}\n`;
     content += `Net Income,${incomeStatement?.netIncome?.toLocaleString() || 'N/A'}\n`;
-    content += `Earnings Per Share,${incomeStatement?.earningsPerShare || 'N/A'}\n\n`;
+    content += `Earnings Per Share,$${incomeStatement?.earningsPerShare || 'N/A'}\n`;
+    content += `Shares Outstanding,${incomeStatement?.sharesOutstanding?.toLocaleString() || 'N/A'}\n\n`;
 
     // Balance Sheet
     content += `BALANCE SHEET (in USD)\n`;
-    content += `Total Assets,${balanceSheet?.totalAssets?.toLocaleString() || 'N/A'}\n`;
+    content += `ASSETS\n`;
     content += `Current Assets,${balanceSheet?.currentAssets?.toLocaleString() || 'N/A'}\n`;
     content += `Cash and Cash Equivalents,${balanceSheet?.cashAndCashEquivalents?.toLocaleString() || 'N/A'}\n`;
+    content += `Total Assets,${balanceSheet?.totalAssets?.toLocaleString() || 'N/A'}\n`;
+    content += `\n`;
+    content += `LIABILITIES\n`;
+    content += `Current Liabilities,${balanceSheet?.currentLiabilities?.toLocaleString() || 'N/A'}\n`;
     content += `Total Liabilities,${balanceSheet?.totalLiabilities?.toLocaleString() || 'N/A'}\n`;
-    content += `Stockholders Equity,${balanceSheet?.stockholdersEquity?.toLocaleString() || 'N/A'}\n\n`;
+    content += `\n`;
+    content += `EQUITY\n`;
+    content += `Stockholders Equity,${balanceSheet?.stockholdersEquity?.toLocaleString() || 'N/A'}\n`;
+    content += `Working Capital,${balanceSheet?.workingCapital?.toLocaleString() || 'N/A'}\n\n`;
 
     // Cash Flow Statement
     content += `CASH FLOW STATEMENT (in USD)\n`;
     content += `Operating Cash Flow,${cashFlowStatement?.operatingCashFlow?.toLocaleString() || 'N/A'}\n`;
     content += `Investing Cash Flow,${cashFlowStatement?.investingCashFlow?.toLocaleString() || 'N/A'}\n`;
-    content += `Financing Cash Flow,${cashFlowStatement?.financingCashFlow?.toLocaleString() || 'N/A'}\n\n`;
+    content += `Financing Cash Flow,${cashFlowStatement?.financingCashFlow?.toLocaleString() || 'N/A'}\n`;
+    content += `Free Cash Flow,${cashFlowStatement?.freeCashFlow?.toLocaleString() || 'N/A'}\n\n`;
 
     // Financial Ratios
     content += `FINANCIAL RATIOS\n`;
-    content += `Gross Margin %,${keyMetrics?.grossMargin?.toFixed(2) || 'N/A'}\n`;
-    content += `Net Profit Margin %,${keyMetrics?.netMargin?.toFixed(2) || 'N/A'}\n`;
-    content += `Return on Assets %,${keyMetrics?.returnOnAssets?.toFixed(2) || 'N/A'}\n`;
-    content += `Return on Equity %,${keyMetrics?.returnOnEquity?.toFixed(2) || 'N/A'}\n\n`;
+    content += `PROFITABILITY\n`;
+    content += `Gross Margin %,${keyMetrics?.grossMargin || 'N/A'}\n`;
+    content += `Operating Margin %,${keyMetrics?.operatingMargin || 'N/A'}\n`;
+    content += `Net Profit Margin %,${keyMetrics?.netMargin || 'N/A'}\n`;
+    content += `Return on Assets %,${keyMetrics?.returnOnAssets || 'N/A'}\n`;
+    content += `Return on Equity %,${keyMetrics?.returnOnEquity || 'N/A'}\n`;
+    content += `\n`;
+    content += `LIQUIDITY\n`;
+    content += `Current Ratio,${keyMetrics?.currentRatio || 'N/A'}\n`;
+    content += `Quick Ratio,${keyMetrics?.quickRatio || 'N/A'}\n`;
+    content += `\n`;
+    content += `LEVERAGE\n`;
+    content += `Debt to Equity,${keyMetrics?.debtToEquity || 'N/A'}\n`;
+    content += `Debt to Assets %,${keyMetrics?.debtToAssets || 'N/A'}\n`;
+    content += `\n`;
+    content += `EFFICIENCY\n`;
+    content += `Asset Turnover,${keyMetrics?.assetTurnover || 'N/A'}\n`;
+    content += `\n`;
+    content += `PER SHARE METRICS\n`;
+    content += `Book Value per Share,$${keyMetrics?.bookValuePerShare || 'N/A'}\n`;
+    content += `Revenue per Share,$${keyMetrics?.revenuePerShare || 'N/A'}\n\n`;
+
+    // Quarterly Trends
+    if (secData.trends && secData.trends.quarterlyRevenue && secData.trends.quarterlyRevenue.length > 0) {
+      content += `QUARTERLY REVENUE TREND\n`;
+      secData.trends.quarterlyRevenue.forEach(q => {
+        content += `${q.period} ${q.year},${q.value?.toLocaleString() || 'N/A'}\n`;
+      });
+      content += `\n`;
+    }
 
     // Company Address
     if (company.businessAddress) {
       content += `BUSINESS ADDRESS\n`;
       content += `${company.businessAddress.street1 || ''}\n`;
+      if (company.businessAddress.street2) {
+        content += `${company.businessAddress.street2}\n`;
+      }
       content += `${company.businessAddress.city || ''}, ${company.businessAddress.stateOrCountry || ''} ${company.businessAddress.zipCode || ''}\n`;
       content += `Phone: ${company.phone || 'N/A'}\n\n`;
     }
 
-    content += `Data Source: SEC EDGAR Database\n`;
-    content += `Generated by: SEC 10-K to Excel Converter\n`;
+    // Data quality notes
+    if (secData.dataQuality && secData.dataQuality.issues.length > 0) {
+      content += `DATA QUALITY NOTES\n`;
+      secData.dataQuality.issues.forEach(issue => {
+        content += `- ${issue}\n`;
+      });
+      content += `\n`;
+    }
+
+    content += `Data Source: SEC EDGAR Database (XBRL)\n`;
+    content += `Generated by: Universal SEC 10-K Converter\n`;
 
     return content;
   };
@@ -351,6 +440,40 @@ const SECConverter = () => {
               </div>
             )}
             
+            {/* Data Quality Indicator */}
+            {dataQuality && !loading && (
+              <div className="mt-4 bg-gray-50 rounded-xl p-4 border border-gray-200">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2">
+                    {dataQuality.score >= 80 ? (
+                      <CheckCircle className="w-5 h-5 text-green-500" />
+                    ) : dataQuality.score >= 50 ? (
+                      <AlertTriangle className="w-5 h-5 text-yellow-500" />
+                    ) : (
+                      <AlertCircle className="w-5 h-5 text-red-500" />
+                    )}
+                    <span className="font-semibold text-gray-700">Data Quality Score</span>
+                  </div>
+                  <span className={`font-bold ${
+                    dataQuality.score >= 80 ? 'text-green-600' : 
+                    dataQuality.score >= 50 ? 'text-yellow-600' : 'text-red-600'
+                  }`}>
+                    {dataQuality.score}/110
+                  </span>
+                </div>
+                {dataQuality.issues.length > 0 && (
+                  <div className="mt-2 text-sm text-gray-600">
+                    <p className="font-medium">Data limitations:</p>
+                    <ul className="list-disc list-inside">
+                      {dataQuality.issues.map((issue, idx) => (
+                        <li key={idx}>{issue}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+            
             {/* Extract Button */}
             <button
               onClick={processCompanyData}
@@ -410,8 +533,23 @@ const SECConverter = () => {
                     </div>
                   </div>
                   <div className="flex items-center justify-between text-sm text-gray-600">
-                    <span>{download.fileSize}</span>
+                    <span>FY {download.dataYear}</span>
                     <span>{download.date}</span>
+                  </div>
+                  <div className="mt-1">
+                    <div className="flex items-center space-x-1">
+                      <span className="text-xs text-gray-500">Quality:</span>
+                      <div className="flex-1 bg-gray-200 rounded-full h-2">
+                        <div 
+                          className={`h-2 rounded-full ${
+                            download.dataQuality >= 80 ? 'bg-green-500' :
+                            download.dataQuality >= 50 ? 'bg-yellow-500' : 'bg-red-500'
+                          }`}
+                          style={{ width: `${(download.dataQuality / 110) * 100}%` }}
+                        ></div>
+                      </div>
+                      <span className="text-xs text-gray-600">{download.dataQuality}/110</span>
+                    </div>
                   </div>
                 </div>
               ))}
@@ -431,8 +569,9 @@ const SECConverter = () => {
               </div>
               <ul className="text-sm text-gray-600 space-y-1">
                 <li>• Revenue & expenses</li>
-                <li>• Net income</li>
-                <li>• Earnings per share</li>
+                <li>• Gross & operating profit</li>
+                <li>• Net income & EPS</li>
+                <li>• Operating metrics</li>
               </ul>
             </div>
             
@@ -444,6 +583,7 @@ const SECConverter = () => {
               <ul className="text-sm text-gray-600 space-y-1">
                 <li>• Assets & liabilities</li>
                 <li>• Cash position</li>
+                <li>• Working capital</li>
                 <li>• Stockholders equity</li>
               </ul>
             </div>
@@ -457,6 +597,7 @@ const SECConverter = () => {
                 <li>• Operating cash flow</li>
                 <li>• Investment activities</li>
                 <li>• Financing activities</li>
+                <li>• Free cash flow</li>
               </ul>
             </div>
             
@@ -466,10 +607,21 @@ const SECConverter = () => {
                 <h4 className="font-semibold text-gray-900">Financial Ratios</h4>
               </div>
               <ul className="text-sm text-gray-600 space-y-1">
-                <li>• Profitability ratios</li>
-                <li>• Return metrics</li>
+                <li>• Profitability metrics</li>
+                <li>• Liquidity ratios</li>
+                <li>• Leverage metrics</li>
                 <li>• Efficiency ratios</li>
               </ul>
+            </div>
+          </div>
+          
+          <div className="mt-6 bg-amber-50 rounded-lg p-4 border border-amber-200">
+            <div className="flex items-start space-x-2">
+              <AlertTriangle className="w-5 h-5 text-amber-600 mt-0.5" />
+              <div className="text-sm text-amber-800">
+                <p className="font-semibold mb-1">Data Accuracy Notice</p>
+                <p>We extract data directly from SEC XBRL filings. Different companies use different accounting field names, which may occasionally result in missing or incomplete data. We continuously improve our extraction algorithms.</p>
+              </div>
             </div>
           </div>
         </div>
