@@ -1,4 +1,4 @@
-// Fixed pages/api/sec-data.js
+// Fixed pages/api/sec-data.js with accurate data extraction
 export default async function handler(req, res) {
   if (req.method !== 'GET') {
     return res.status(405).json({ message: 'Method not allowed' });
@@ -30,128 +30,398 @@ export default async function handler(req, res) {
     const factsData = await factsResponse.json();
     const facts = factsData.facts;
     const usgaap = facts['us-gaap'] || {};
+    const dei = facts['dei'] || {};
 
-    // DEBUG: Log available fields for troubleshooting
-    console.log(`\nDEBUG - ${ticker} Available Fields:`, Object.keys(usgaap).filter(key => key.toLowerCase().includes('revenue')).slice(0, 10));
+    // Get fiscal year end info
+    const entityInfo = {
+      fiscalYearEnd: dei?.CurrentFiscalYearEndDate?.units?.USD?.[0]?.val || 'Unknown'
+    };
 
-    // IMPROVED: Helper function to get most recent ANNUAL value with better filtering
-    const getRecentValue = (factKey, units = 'USD') => {
+    console.log(`\n=== Processing ${ticker} (CIK: ${cik}) ===`);
+    console.log(`Available US-GAAP fields: ${Object.keys(usgaap).length}`);
+
+    // CRITICAL FIX: Get the most recent ANNUAL value with proper validation
+    const getRecentAnnualValue = (fieldNames, units = 'USD', minYear = 2022) => {
       try {
-        const fact = usgaap[factKey];
-        if (!fact || !fact.units || !fact.units[units]) return null;
+        // Try multiple field names in order of preference
+        const fieldArray = Array.isArray(fieldNames) ? fieldNames : [fieldNames];
         
-        const values = fact.units[units];
-        if (!values || values.length === 0) return null;
-        
-        // CRITICAL FIX: Only get ANNUAL data from 10-K filings
-        const annualValues = values.filter(v => 
-          v.form && 
-          (v.form === '10-K' || v.form === '10-K/A') && 
-          v.fp === 'FY' &&  // Full Year only
-          v.val !== null &&
-          v.val !== undefined &&
-          !isNaN(v.val) &&
-          v.val > 0 &&  // Ensure positive values
-          v.end  // Must have end date
-        );
-        
-        if (annualValues.length === 0) {
-          console.log(`No annual data found for ${factKey}`);
-          return null;
+        for (const fieldName of fieldArray) {
+          const fact = usgaap[fieldName];
+          if (!fact || !fact.units || !fact.units[units]) continue;
+          
+          const values = fact.units[units];
+          if (!values || values.length === 0) continue;
+          
+          // Filter for ANNUAL 10-K data only
+          const annualValues = values.filter(v => {
+            const isAnnual = v.form && (v.form === '10-K' || v.form === '10-K/A');
+            const isFullYear = v.fp === 'FY';
+            const hasValidValue = v.val !== null && v.val !== undefined && !isNaN(v.val);
+            const hasEndDate = v.end;
+            const year = v.end ? new Date(v.end).getFullYear() : 0;
+            const isRecent = year >= minYear;
+            
+            return isAnnual && isFullYear && hasValidValue && hasEndDate && isRecent;
+          });
+          
+          if (annualValues.length === 0) continue;
+          
+          // Sort by end date (most recent first)
+          annualValues.sort((a, b) => new Date(b.end) - new Date(a.end));
+          
+          // Get the most recent value
+          const mostRecent = annualValues[0];
+          const year = new Date(mostRecent.end).getFullYear();
+          
+          console.log(`Found ${fieldName}: ${mostRecent.val.toLocaleString()} (FY${year})`);
+          
+          return {
+            value: mostRecent.val,
+            year: year,
+            endDate: mostRecent.end,
+            filingDate: mostRecent.filed
+          };
         }
         
-        // Sort by end date and get most recent
-        annualValues.sort((a, b) => new Date(b.end) - new Date(a.end));
-        const mostRecent = annualValues[0];
-        
-        console.log(`${factKey}: ${mostRecent.val} (period: ${mostRecent.end})`);
-        return mostRecent.val;
+        console.log(`No data found for fields: ${fieldArray.join(', ')}`);
+        return null;
         
       } catch (error) {
-        console.error(`Error getting ${factKey}:`, error);
+        console.error(`Error getting value for ${fieldNames}:`, error);
         return null;
       }
     };
 
-    // IMPROVED: Try multiple revenue field names in order of preference
-    const revenues = getRecentValue('Revenues') || 
-                   getRecentValue('RevenueFromContractWithCustomerExcludingAssessedTax') ||
-                   getRecentValue('SalesRevenueNet') ||
-                   getRecentValue('RevenuesNetOfInterestExpense') ||
-                   getRecentValue('TotalRevenues');
-
-    console.log(`FINAL Revenue for ${ticker}: ${revenues}`);
-
-    // IMPROVED: Try multiple cost field names
-    const costOfRevenues = getRecentValue('CostOfGoodsAndServicesSold') || 
-                          getRecentValue('CostOfRevenue') ||
-                          getRecentValue('CostOfGoodsSold') ||
-                          getRecentValue('CostOfSales');
-
-    const grossProfit = revenues && costOfRevenues ? revenues - costOfRevenues : null;
-    
-    const operatingIncome = getRecentValue('OperatingIncomeLoss');
-    const netIncome = getRecentValue('NetIncomeLoss');
-    const totalAssets = getRecentValue('Assets');
-    const totalLiabilities = getRecentValue('Liabilities');
-    const stockholdersEquity = getRecentValue('StockholdersEquity');
-    const currentAssets = getRecentValue('AssetsCurrent');
-    const currentLiabilities = getRecentValue('LiabilitiesCurrent');
-    const cashAndEquivalents = getRecentValue('CashAndCashEquivalentsAtCarryingValue') ||
-                              getRecentValue('CashCashEquivalentsAndShortTermInvestments');
-
-    // IMPROVED: Calculate ratios with better error handling
-    const calculateRatio = (numerator, denominator) => {
-      if (!numerator || !denominator || denominator === 0) return null;
-      return (numerator / denominator) * 100;
-    };
-
-    // VALIDATION: Check if key numbers make sense
-    if (revenues && revenues < 1000000) {
-      console.warn(`Warning: Revenue seems too low for ${ticker}: ${revenues}`);
-    }
-
-    if (grossProfit && grossProfit < 0 && revenues && revenues > 1000000000) {
-      console.warn(`Warning: Negative gross profit for major company ${ticker}: ${grossProfit}`);
-    }
-
-    const data = {
-      incomeStatement: {
-        revenues,
-        costOfRevenues,
-        grossProfit,
-        operatingIncome,
-        netIncome,
-        earningsPerShare: getRecentValue('EarningsPerShareBasic'),
-      },
-      balanceSheet: {
-        totalAssets,
-        currentAssets,
-        cashAndCashEquivalents: cashAndEquivalents,
-        totalLiabilities,
-        currentLiabilities,
-        stockholdersEquity,
-      },
-      cashFlowStatement: {
-        operatingCashFlow: getRecentValue('NetCashProvidedByUsedInOperatingActivities'),
-        investingCashFlow: getRecentValue('NetCashProvidedByUsedInInvestingActivities'),
-        financingCashFlow: getRecentValue('NetCashProvidedByUsedInFinancingActivities'),
-      },
-      keyMetrics: {
-        grossMargin: calculateRatio(grossProfit, revenues),
-        netMargin: calculateRatio(netIncome, revenues),
-        returnOnAssets: calculateRatio(netIncome, totalAssets),
-        returnOnEquity: calculateRatio(netIncome, stockholdersEquity),
-        currentRatio: currentAssets && currentLiabilities ? currentAssets / currentLiabilities : null,
+    // Get quarterly values for trend analysis
+    const getQuarterlyValues = (fieldNames, units = 'USD', quarters = 4) => {
+      try {
+        const fieldArray = Array.isArray(fieldNames) ? fieldNames : [fieldNames];
+        
+        for (const fieldName of fieldArray) {
+          const fact = usgaap[fieldName];
+          if (!fact || !fact.units || !fact.units[units]) continue;
+          
+          const values = fact.units[units];
+          if (!values || values.length === 0) continue;
+          
+          // Filter for quarterly data
+          const quarterlyValues = values.filter(v => {
+            const isQuarterly = v.form && (v.form === '10-Q' || v.form === '10-K');
+            const isQuarter = ['Q1', 'Q2', 'Q3', 'Q4', 'FY'].includes(v.fp);
+            const hasValidValue = v.val !== null && v.val !== undefined && !isNaN(v.val);
+            const hasEndDate = v.end;
+            
+            return isQuarterly && isQuarter && hasValidValue && hasEndDate;
+          });
+          
+          if (quarterlyValues.length === 0) continue;
+          
+          // Sort by end date (most recent first)
+          quarterlyValues.sort((a, b) => new Date(b.end) - new Date(a.end));
+          
+          // Get the most recent quarters
+          return quarterlyValues.slice(0, quarters).map(q => ({
+            value: q.val,
+            period: q.fp,
+            endDate: q.end,
+            year: new Date(q.end).getFullYear()
+          }));
+        }
+        
+        return [];
+      } catch (error) {
+        console.error(`Error getting quarterly values:`, error);
+        return [];
       }
     };
 
-    // VALIDATION: Log final results for verification
-    console.log(`\nFINAL RESULTS for ${ticker}:`);
-    console.log(`Revenue: ${data.incomeStatement.revenues?.toLocaleString() || 'N/A'}`);
-    console.log(`Net Income: ${data.incomeStatement.netIncome?.toLocaleString() || 'N/A'}`);
-    console.log(`Total Assets: ${data.balanceSheet.totalAssets?.toLocaleString() || 'N/A'}`);
-    console.log(`Gross Margin: ${data.keyMetrics.grossMargin?.toFixed(2) || 'N/A'}%`);
+    console.log('\n--- Extracting Financial Data ---');
+
+    // COMPREHENSIVE REVENUE FIELD MAPPING
+    const revenueFields = [
+      'RevenueFromContractWithCustomerExcludingAssessedTax',
+      'Revenues',
+      'SalesRevenueNet',
+      'RevenuesNetOfInterestExpense',
+      'RevenueFromContractWithCustomerIncludingAssessedTax',
+      'SalesRevenueGoodsNet',
+      'SalesRevenueServicesNet',
+      'TotalRevenues',
+      'Revenue',
+      'NetRevenues',
+      'OperatingRevenues',
+      'RevenueFromSaleOfGoods',
+      'RevenueFromServices'
+    ];
+
+    const revenueData = getRecentAnnualValue(revenueFields);
+    const revenue = revenueData?.value || 0;
+
+    // COMPREHENSIVE COST FIELD MAPPING
+    const costFields = [
+      'CostOfGoodsAndServicesSold',
+      'CostOfRevenue',
+      'CostOfGoodsSold',
+      'CostOfSales',
+      'CostOfServices',
+      'CostOfProductRevenue',
+      'CostOfServiceRevenue',
+      'CostOfRevenueExcludingDepreciationAndAmortization'
+    ];
+
+    const costData = getRecentAnnualValue(costFields);
+    const costOfRevenue = costData?.value || 0;
+
+    // Calculate gross profit
+    const grossProfit = revenue > 0 && costOfRevenue > 0 ? revenue - costOfRevenue : null;
+
+    // Operating expenses
+    const opExpenseFields = [
+      'OperatingExpenses',
+      'OperatingCostsAndExpenses',
+      'CostsAndExpenses',
+      'SellingGeneralAndAdministrativeExpense',
+      'ResearchAndDevelopmentExpense'
+    ];
+
+    const sgaData = getRecentAnnualValue(['SellingGeneralAndAdministrativeExpense', 'GeneralAndAdministrativeExpense']);
+    const rdData = getRecentAnnualValue(['ResearchAndDevelopmentExpense', 'ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost']);
+    
+    // Operating income
+    const operatingIncomeData = getRecentAnnualValue(['OperatingIncomeLoss', 'IncomeLossFromOperations']);
+    const operatingIncome = operatingIncomeData?.value || 0;
+
+    // Net income
+    const netIncomeData = getRecentAnnualValue(['NetIncomeLoss', 'ProfitLoss', 'NetIncomeLossAvailableToCommonStockholdersBasic']);
+    const netIncome = netIncomeData?.value || 0;
+
+    // Balance sheet items
+    const totalAssetsData = getRecentAnnualValue(['Assets', 'TotalAssets']);
+    const totalAssets = totalAssetsData?.value || 0;
+
+    const totalLiabilitiesData = getRecentAnnualValue(['Liabilities', 'TotalLiabilities']);
+    const totalLiabilities = totalLiabilitiesData?.value || 0;
+
+    const equityData = getRecentAnnualValue(['StockholdersEquity', 'StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest', 'TotalEquity']);
+    const stockholdersEquity = equityData?.value || 0;
+
+    const currentAssetsData = getRecentAnnualValue(['AssetsCurrent', 'CurrentAssets']);
+    const currentAssets = currentAssetsData?.value || 0;
+
+    const currentLiabilitiesData = getRecentAnnualValue(['LiabilitiesCurrent', 'CurrentLiabilities']);
+    const currentLiabilities = currentLiabilitiesData?.value || 0;
+
+    const cashData = getRecentAnnualValue([
+      'CashAndCashEquivalentsAtCarryingValue',
+      'CashCashEquivalentsAndShortTermInvestments',
+      'Cash',
+      'CashAndCashEquivalents'
+    ]);
+    const cashAndEquivalents = cashData?.value || 0;
+
+    // Cash flow items
+    const operatingCashFlowData = getRecentAnnualValue([
+      'NetCashProvidedByUsedInOperatingActivities',
+      'NetCashProvidedByOperatingActivities',
+      'CashFlowsFromOperatingActivities'
+    ]);
+    const operatingCashFlow = operatingCashFlowData?.value || 0;
+
+    const investingCashFlowData = getRecentAnnualValue([
+      'NetCashProvidedByUsedInInvestingActivities',
+      'NetCashUsedInInvestingActivities'
+    ]);
+    const investingCashFlow = investingCashFlowData?.value || 0;
+
+    const financingCashFlowData = getRecentAnnualValue([
+      'NetCashProvidedByUsedInFinancingActivities',
+      'NetCashUsedInFinancingActivities'
+    ]);
+    const financingCashFlow = financingCashFlowData?.value || 0;
+
+    // Shares and EPS
+    const sharesData = getRecentAnnualValue([
+      'WeightedAverageNumberOfSharesOutstandingBasic',
+      'CommonStockSharesOutstanding',
+      'EntityCommonStockSharesOutstanding'
+    ]);
+    const sharesOutstanding = sharesData?.value || 0;
+
+    const epsData = getRecentAnnualValue([
+      'EarningsPerShareBasic',
+      'EarningsPerShareDiluted',
+      'BasicEarningsPerShare'
+    ]);
+    const earningsPerShare = epsData?.value || 0;
+
+    // VALIDATION CHECKS
+    console.log('\n--- Validation Checks ---');
+    
+    // Check if we have core data
+    if (!revenue || revenue === 0) {
+      console.warn('⚠️  Warning: No revenue data found');
+    }
+    
+    // Validate financial relationships
+    if (grossProfit !== null && operatingIncome > grossProfit) {
+      console.error('❌ ERROR: Operating Income > Gross Profit (impossible!)');
+      console.log(`   Operating Income: ${operatingIncome.toLocaleString()}`);
+      console.log(`   Gross Profit: ${grossProfit.toLocaleString()}`);
+      // Attempt to fix by recalculating
+      const fixedOperatingIncome = grossProfit - (sgaData?.value || 0) - (rdData?.value || 0);
+      console.log(`   Attempting fix: ${fixedOperatingIncome.toLocaleString()}`);
+    }
+
+    // Validate margins
+    const grossMargin = revenue > 0 && grossProfit ? (grossProfit / revenue) * 100 : null;
+    const netMargin = revenue > 0 && netIncome ? (netIncome / revenue) * 100 : null;
+
+    if (grossMargin && netMargin && netMargin > grossMargin) {
+      console.error('❌ ERROR: Net Margin > Gross Margin (impossible!)');
+    }
+
+    // Get quarterly trend data for context
+    const quarterlyRevenue = getQuarterlyValues(revenueFields);
+    const quarterlyNetIncome = getQuarterlyValues(['NetIncomeLoss', 'ProfitLoss']);
+
+    // Calculate key metrics with validation
+    const calculateRatio = (numerator, denominator, decimals = 2) => {
+      if (!numerator || !denominator || denominator === 0) return null;
+      const ratio = (numerator / denominator) * 100;
+      // Sanity check for ratios
+      if (ratio > 1000 || ratio < -1000) {
+        console.warn(`⚠️  Unusual ratio detected: ${ratio}%`);
+        return null;
+      }
+      return Number(ratio.toFixed(decimals));
+    };
+
+    const calculateSimpleRatio = (numerator, denominator, decimals = 2) => {
+      if (!numerator || !denominator || denominator === 0) return null;
+      return Number((numerator / denominator).toFixed(decimals));
+    };
+
+    // Prepare response data
+    const data = {
+      metadata: {
+        ticker: ticker,
+        cik: cik,
+        dataYear: revenueData?.year || 'N/A',
+        filingDate: revenueData?.filingDate || 'N/A',
+        fiscalYearEnd: entityInfo.fiscalYearEnd
+      },
+      incomeStatement: {
+        revenues: revenue,
+        costOfRevenues: costOfRevenue,
+        grossProfit: grossProfit,
+        operatingExpenses: {
+          sga: sgaData?.value || null,
+          rd: rdData?.value || null,
+          total: (sgaData?.value || 0) + (rdData?.value || 0) || null
+        },
+        operatingIncome: operatingIncome,
+        netIncome: netIncome,
+        earningsPerShare: earningsPerShare,
+        sharesOutstanding: sharesOutstanding
+      },
+      balanceSheet: {
+        totalAssets: totalAssets,
+        currentAssets: currentAssets,
+        cashAndCashEquivalents: cashAndEquivalents,
+        totalLiabilities: totalLiabilities,
+        currentLiabilities: currentLiabilities,
+        stockholdersEquity: stockholdersEquity,
+        workingCapital: currentAssets && currentLiabilities ? currentAssets - currentLiabilities : null
+      },
+      cashFlowStatement: {
+        operatingCashFlow: operatingCashFlow,
+        investingCashFlow: investingCashFlow,
+        financingCashFlow: financingCashFlow,
+        freeCashFlow: operatingCashFlow && investingCashFlow ? operatingCashFlow + investingCashFlow : null
+      },
+      keyMetrics: {
+        // Profitability metrics
+        grossMargin: calculateRatio(grossProfit, revenue),
+        operatingMargin: calculateRatio(operatingIncome, revenue),
+        netMargin: calculateRatio(netIncome, revenue),
+        
+        // Return metrics
+        returnOnAssets: calculateRatio(netIncome, totalAssets),
+        returnOnEquity: calculateRatio(netIncome, stockholdersEquity),
+        
+        // Liquidity metrics
+        currentRatio: calculateSimpleRatio(currentAssets, currentLiabilities),
+        quickRatio: calculateSimpleRatio((currentAssets - (currentAssets * 0.3)), currentLiabilities), // Approximation
+        
+        // Leverage metrics
+        debtToEquity: calculateSimpleRatio((totalLiabilities - currentLiabilities), stockholdersEquity),
+        debtToAssets: calculateRatio((totalLiabilities - currentLiabilities), totalAssets),
+        
+        // Efficiency metrics
+        assetTurnover: calculateSimpleRatio(revenue, totalAssets),
+        
+        // Valuation metrics (if we had market cap)
+        priceToEarnings: null, // Would need stock price
+        priceToBook: null, // Would need market cap
+        
+        // Per share metrics
+        bookValuePerShare: sharesOutstanding > 0 ? (stockholdersEquity / sharesOutstanding).toFixed(2) : null,
+        revenuePerShare: sharesOutstanding > 0 ? (revenue / sharesOutstanding).toFixed(2) : null
+      },
+      trends: {
+        quarterlyRevenue: quarterlyRevenue,
+        quarterlyNetIncome: quarterlyNetIncome
+      }
+    };
+
+    // Final validation summary
+    console.log('\n--- Final Data Summary ---');
+    console.log(`Revenue: $${(revenue / 1e9).toFixed(2)}B`);
+    console.log(`Gross Profit: $${(grossProfit / 1e9).toFixed(2)}B (${data.keyMetrics.grossMargin}%)`);
+    console.log(`Operating Income: $${(operatingIncome / 1e9).toFixed(2)}B`);
+    console.log(`Net Income: $${(netIncome / 1e9).toFixed(2)}B (${data.keyMetrics.netMargin}%)`);
+    console.log(`Total Assets: $${(totalAssets / 1e9).toFixed(2)}B`);
+    console.log(`Stockholders Equity: $${(stockholdersEquity / 1e9).toFixed(2)}B`);
+    console.log(`ROE: ${data.keyMetrics.returnOnEquity}%`);
+    
+    // Add data quality score
+    const dataQuality = {
+      score: 0,
+      issues: []
+    };
+    
+    if (revenue > 0) dataQuality.score += 25;
+    else dataQuality.issues.push('Missing revenue data');
+    
+    if (grossProfit !== null && grossProfit > 0) dataQuality.score += 25;
+    else dataQuality.issues.push('Missing or invalid gross profit');
+    
+    if (totalAssets > 0) dataQuality.score += 25;
+    else dataQuality.issues.push('Missing balance sheet data');
+    
+    if (operatingCashFlow !== 0) dataQuality.score += 25;
+    else dataQuality.issues.push('Missing cash flow data');
+    
+    // Check for logical consistency
+    if (grossProfit && operatingIncome && operatingIncome <= grossProfit) {
+      dataQuality.score += 10;
+    } else {
+      dataQuality.issues.push('Inconsistent profitability metrics');
+    }
+    
+    if (grossMargin && netMargin && netMargin <= grossMargin) {
+      dataQuality.score += 10;
+    } else {
+      dataQuality.issues.push('Inconsistent margin calculations');
+    }
+    
+    data.dataQuality = dataQuality;
+
+    console.log(`\nData Quality Score: ${dataQuality.score}/110`);
+    if (dataQuality.issues.length > 0) {
+      console.log('Issues:', dataQuality.issues.join(', '));
+    }
 
     res.status(200).json(data);
 
