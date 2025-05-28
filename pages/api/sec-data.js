@@ -1,4 +1,4 @@
-// API endpoint to fetch SEC financial data
+// Fixed pages/api/sec-data.js
 export default async function handler(req, res) {
   if (req.method !== 'GET') {
     return res.status(405).json({ message: 'Method not allowed' });
@@ -31,7 +31,10 @@ export default async function handler(req, res) {
     const facts = factsData.facts;
     const usgaap = facts['us-gaap'] || {};
 
-    // Helper function to get most recent value with better error handling
+    // DEBUG: Log available fields for troubleshooting
+    console.log(`\nDEBUG - ${ticker} Available Fields:`, Object.keys(usgaap).filter(key => key.toLowerCase().includes('revenue')).slice(0, 10));
+
+    // IMPROVED: Helper function to get most recent ANNUAL value with better filtering
     const getRecentValue = (factKey, units = 'USD') => {
       try {
         const fact = usgaap[factKey];
@@ -40,37 +43,50 @@ export default async function handler(req, res) {
         const values = fact.units[units];
         if (!values || values.length === 0) return null;
         
-        // Get most recent annual value (not quarterly)
+        // CRITICAL FIX: Only get ANNUAL data from 10-K filings
         const annualValues = values.filter(v => 
           v.form && 
           (v.form === '10-K' || v.form === '10-K/A') && 
-          v.fp === 'FY' &&
+          v.fp === 'FY' &&  // Full Year only
           v.val !== null &&
           v.val !== undefined &&
-          !isNaN(v.val)
+          !isNaN(v.val) &&
+          v.val > 0 &&  // Ensure positive values
+          v.end  // Must have end date
         );
         
         if (annualValues.length === 0) {
-          const mostRecent = values[values.length - 1];
-          return mostRecent?.val || null;
+          console.log(`No annual data found for ${factKey}`);
+          return null;
         }
         
-        return annualValues[annualValues.length - 1]?.val || null;
+        // Sort by end date and get most recent
+        annualValues.sort((a, b) => new Date(b.end) - new Date(a.end));
+        const mostRecent = annualValues[0];
+        
+        console.log(`${factKey}: ${mostRecent.val} (period: ${mostRecent.end})`);
+        return mostRecent.val;
+        
       } catch (error) {
         console.error(`Error getting ${factKey}:`, error);
         return null;
       }
     };
 
-    // Extract financial data with multiple field attempts
+    // IMPROVED: Try multiple revenue field names in order of preference
     const revenues = getRecentValue('Revenues') || 
                    getRecentValue('RevenueFromContractWithCustomerExcludingAssessedTax') ||
                    getRecentValue('SalesRevenueNet') ||
-                   getRecentValue('RevenuesNetOfInterestExpense');
+                   getRecentValue('RevenuesNetOfInterestExpense') ||
+                   getRecentValue('TotalRevenues');
 
+    console.log(`FINAL Revenue for ${ticker}: ${revenues}`);
+
+    // IMPROVED: Try multiple cost field names
     const costOfRevenues = getRecentValue('CostOfGoodsAndServicesSold') || 
                           getRecentValue('CostOfRevenue') ||
-                          getRecentValue('CostOfGoodsSold');
+                          getRecentValue('CostOfGoodsSold') ||
+                          getRecentValue('CostOfSales');
 
     const grossProfit = revenues && costOfRevenues ? revenues - costOfRevenues : null;
     
@@ -84,11 +100,20 @@ export default async function handler(req, res) {
     const cashAndEquivalents = getRecentValue('CashAndCashEquivalentsAtCarryingValue') ||
                               getRecentValue('CashCashEquivalentsAndShortTermInvestments');
 
-    // Calculate ratios with null checks
+    // IMPROVED: Calculate ratios with better error handling
     const calculateRatio = (numerator, denominator) => {
       if (!numerator || !denominator || denominator === 0) return null;
       return (numerator / denominator) * 100;
     };
+
+    // VALIDATION: Check if key numbers make sense
+    if (revenues && revenues < 1000000) {
+      console.warn(`Warning: Revenue seems too low for ${ticker}: ${revenues}`);
+    }
+
+    if (grossProfit && grossProfit < 0 && revenues && revenues > 1000000000) {
+      console.warn(`Warning: Negative gross profit for major company ${ticker}: ${grossProfit}`);
+    }
 
     const data = {
       incomeStatement: {
@@ -121,8 +146,12 @@ export default async function handler(req, res) {
       }
     };
 
-    // Log successful extraction for debugging
-    console.log(`Successfully extracted data for ${ticker} (CIK: ${cik})`);
+    // VALIDATION: Log final results for verification
+    console.log(`\nFINAL RESULTS for ${ticker}:`);
+    console.log(`Revenue: ${data.incomeStatement.revenues?.toLocaleString() || 'N/A'}`);
+    console.log(`Net Income: ${data.incomeStatement.netIncome?.toLocaleString() || 'N/A'}`);
+    console.log(`Total Assets: ${data.balanceSheet.totalAssets?.toLocaleString() || 'N/A'}`);
+    console.log(`Gross Margin: ${data.keyMetrics.grossMargin?.toFixed(2) || 'N/A'}%`);
 
     res.status(200).json(data);
 
