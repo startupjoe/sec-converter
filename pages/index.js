@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Download, AlertCircle, CheckCircle, Loader, Search, 
-  FileSpreadsheet, Building2, CloudDownload, TrendingUp,
+  FileSpreadsheet, Building2, TrendingUp,
   Database, Zap, Shield, Activity, Target, BarChart
 } from 'lucide-react';
 
@@ -364,7 +364,7 @@ const SECConverter = () => {
                 </>
               ) : (
                 <>
-                  <CloudDownload className="w-5 h-5" />
+                  <Download className="w-5 h-5" />
                   <span>Extract SEC Data to Excel</span>
                 </>
               )}
